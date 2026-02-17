@@ -1,0 +1,6 @@
+click
+pyarrow
+python-dateutil
+scrapy
+yapf
+rich

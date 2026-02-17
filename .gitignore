@@ -1,0 +1,16 @@
+# Ignore all compiled artifacts
+*.pyc
+
+# Ignore logs
+*.log
+
+# Ignore generated datasets
+*.jl
+*.csv
+*.json
+
+*.egg*
+# Ignore virtualenv
+gscraper
+
+*.parquet
