@@ -20,5 +20,7 @@ exclude = ["logs*", "checkpoints*"]
 [tool.uv]
 dev-dependencies = [
     "black>=22.0.0",
+    "marimo>=0.8.22",
+    "pandas>=2.0.3",
     "pytest>=7.0.0",
 ]

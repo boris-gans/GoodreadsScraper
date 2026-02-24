@@ -6,17 +6,27 @@ descriptions and genres. Uses multiprocessing with Scrapy for throughput.
 Usage:
     python search_crawl.py --input books.parquet --output results.csv --workers 10
     python search_crawl.py --input books.parquet --output results.csv --workers 10 --resume
+    python search_crawl.py --input books.parquet --output results.csv --workers 10 --debug
 """
 
 import argparse
 import csv
 import multiprocessing
 import os
-import sys
-import logging
+import shutil
 
 import pyarrow.parquet as pq
 from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, TimeElapsedColumn
+
+
+def clean_directories(checkpoint_dir, log_dir, output_file):
+    """Delete and recreate checkpoint/log dirs; remove previous output CSV."""
+    for d in (checkpoint_dir, log_dir):
+        if os.path.isdir(d):
+            shutil.rmtree(d)
+        os.makedirs(d)
+    if os.path.exists(output_file):
+        os.remove(output_file)
 
 
 def load_checkpoint(checkpoint_dir):
@@ -65,7 +75,7 @@ def read_books_from_parquet(parquet_path):
     return books
 
 
-def run_worker(worker_id, books, output_file, checkpoint_file, log_file):
+def run_worker(worker_id, books, output_file, checkpoint_file, debug=False):
     """Run a Scrapy crawler in a separate process."""
     # Import here to avoid Twisted reactor issues
     from scrapy.crawler import CrawlerProcess
@@ -78,29 +88,62 @@ def run_worker(worker_id, books, output_file, checkpoint_file, log_file):
         "CONCURRENT_REQUESTS_PER_DOMAIN": 32,
         "DOWNLOAD_DELAY": 0,
         "ROBOTSTXT_OBEY": False,
-        "COOKIES_ENABLED": False,
         "RETRY_TIMES": 2,
         "DOWNLOAD_TIMEOUT": 15,
-        "LOG_FILE": log_file,
-        "LOG_LEVEL": "WARNING",
         "ITEM_PIPELINES": {
             "GoodreadsScraper.pipelines.CsvSearchResultPipeline": 300,
         },
         "SEARCH_OUTPUT_FILE": output_file,
         "SEARCH_CHECKPOINT_FILE": checkpoint_file,
         "REQUEST_FINGERPRINTER_IMPLEMENTATION": "2.7",
+        "TELNETCONSOLE_ENABLED": False,
+        "REDIRECT_ENABLED": True,
+        "RETRY_HTTP_CODES": [500, 502, 503, 504, 522, 524, 408, 429, 403],
+        "HTTPERROR_ALLOWED_CODES": [301, 302, 303, 307, 308, 403, 404, 429],
+        "COOKIES_ENABLED": True,
+        "DEFAULT_REQUEST_HEADERS": {
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
+            ),
+        },
     }
+
+    if debug:
+        # Full debug: verbose logging to console + HTML response dumps
+        settings.update({
+            "LOG_LEVEL": "DEBUG",
+            # No LOG_FILE — logs flow to the subprocess's stdout/stderr (visible in terminal)
+            "DOWNLOADER_MIDDLEWARES": {
+                "GoodreadsScraper.middlewares.ResponseDebugMiddleware": 543,
+            },
+            "DEBUG_ENABLED": True,
+            "DEBUG_DUMP_DIR": os.path.join("logs", f"debug_responses_worker_{worker_id}"),
+            "DEBUG_MAX_SNIPPET": 600,
+        })
+    else:
+        # Quiet mode: only WARNING+ goes to a log file; console stays clean
+        settings.update({
+            "LOG_LEVEL": "WARNING",
+            "LOG_FILE": os.path.join("logs", f"worker_{worker_id}.log"),
+            "DEBUG_ENABLED": False,
+        })
 
     process = CrawlerProcess(settings)
     process.crawl("search", books=books)
     process.start()
 
 
+CSV_COLUMNS = ["title", "author", "genres", "description", "publishedYear", "goodreads_url", "status"]
+
+
 def merge_csv_files(worker_files, final_output):
     """Merge per-worker CSV files into a single output CSV."""
-    columns = ["title", "author", "genres", "description", "goodreads_url", "status"]
     with open(final_output, "w", newline="", encoding="utf-8") as outf:
-        writer = csv.DictWriter(outf, fieldnames=columns)
+        writer = csv.DictWriter(outf, fieldnames=CSV_COLUMNS)
         writer.writeheader()
         for wf in worker_files:
             if not os.path.exists(wf):
@@ -108,7 +151,7 @@ def merge_csv_files(worker_files, final_output):
             with open(wf, "r", encoding="utf-8") as inf:
                 reader = csv.DictReader(inf)
                 for row in reader:
-                    writer.writerow(row)
+                    writer.writerow({col: row.get(col, "") for col in CSV_COLUMNS})
 
 
 def main():
@@ -116,29 +159,34 @@ def main():
     parser.add_argument("--input", required=True, help="Input parquet file path")
     parser.add_argument("--output", default="search_results.csv", help="Output CSV file path")
     parser.add_argument("--workers", type=int, default=10, help="Number of worker processes")
-    parser.add_argument("--resume", action="store_true", help="Resume from checkpoints")
+    parser.add_argument("--resume", action="store_true", help="Resume from checkpoints (skips clean)")
+    parser.add_argument("--debug", action="store_true", help="Verbose logging + HTML response dumps")
     args = parser.parse_args()
 
-    # Create output directories
-    os.makedirs("checkpoints", exist_ok=True)
-    os.makedirs("logs", exist_ok=True)
+    CHECKPOINT_DIR = "checkpoints"
+    LOG_DIR = "logs"
+
+    if args.resume:
+        os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+        os.makedirs(LOG_DIR, exist_ok=True)
+    else:
+        print("Cleaning previous run data (checkpoints, logs, output)...")
+        clean_directories(CHECKPOINT_DIR, LOG_DIR, args.output)
 
     print(f"Reading parquet: {args.input}")
     books = read_books_from_parquet(args.input)
-    print(f"Total books in parquet: {len(books)}")
+    print(f"Total books in parquet: {len(books):,}")
 
-    # Filter out completed books on resume
     if args.resume:
-        completed = load_checkpoint("checkpoints")
-        print(f"Already completed: {len(completed)} books")
+        completed = load_checkpoint(CHECKPOINT_DIR)
+        print(f"Already completed: {len(completed):,} books")
         books = [(idx, t, a) for idx, t, a in books if idx not in completed]
-        print(f"Remaining: {len(books)} books")
+        print(f"Remaining: {len(books):,} books")
 
     if not books:
         print("No books to process.")
         return
 
-    # Partition books across workers
     num_workers = min(args.workers, len(books))
     partitions = [[] for _ in range(num_workers)]
     for i, book in enumerate(books):
@@ -147,22 +195,28 @@ def main():
     worker_csv_files = []
     processes = []
 
-    print(f"Launching {num_workers} workers...")
+    print(
+        f"Launching {num_workers} worker(s)  |  "
+        f"debug={'on' if args.debug else 'off'}  |  "
+        f"{len(books):,} books total"
+    )
 
     for worker_id in range(num_workers):
-        output_file = os.path.join("checkpoints", f"worker_{worker_id}.csv")
-        checkpoint_file = os.path.join("checkpoints", f"checkpoint_{worker_id}.txt")
-        log_file = os.path.join("logs", f"worker_{worker_id}.log")
+        output_file = os.path.join(CHECKPOINT_DIR, f"worker_{worker_id}.csv")
+        checkpoint_file = os.path.join(CHECKPOINT_DIR, f"checkpoint_{worker_id}.txt")
         worker_csv_files.append(output_file)
 
         p = multiprocessing.Process(
             target=run_worker,
-            args=(worker_id, partitions[worker_id], output_file, checkpoint_file, log_file),
+            args=(worker_id, partitions[worker_id], output_file, checkpoint_file),
+            kwargs={"debug": args.debug},
         )
         processes.append(p)
         p.start()
 
-    # Wait for all workers with progress display
+    total_books = len(books)
+    next_snapshot_pct = 10
+
     with Progress(
         "[progress.description]{task.description}",
         BarColumn(),
@@ -172,47 +226,70 @@ def main():
         TimeElapsedColumn(),
         TextColumn("{task.completed}/{task.total} books"),
     ) as progress:
-        task = progress.add_task("[cyan]Searching Goodreads...", total=len(books))
+        task = progress.add_task(
+            f"[cyan]Searching Goodreads...  [white]{num_workers} workers / 0 failed",
+            total=total_books,
+        )
 
         while any(p.is_alive() for p in processes):
-            # Count completed items from checkpoint files
             completed_count = 0
             for worker_id in range(num_workers):
-                cp_file = os.path.join("checkpoints", f"checkpoint_{worker_id}.txt")
+                cp_file = os.path.join(CHECKPOINT_DIR, f"checkpoint_{worker_id}.txt")
                 if os.path.exists(cp_file):
                     with open(cp_file) as f:
                         completed_count += sum(1 for line in f if line.strip())
-            progress.update(task, completed=completed_count)
 
-            # Poll every 2 seconds
+            active = sum(1 for p in processes if p.is_alive())
+            failed = sum(1 for p in processes if not p.is_alive() and p.exitcode != 0)
+
+            progress.update(
+                task,
+                completed=completed_count,
+                description=(
+                    f"[cyan]Searching Goodreads...  "
+                    f"[white]{active} workers active  "
+                    f"{'[red]' if failed else '[white]'}{failed} failed"
+                ),
+            )
+
+            if total_books > 0:
+                pct_done = (completed_count / total_books) * 100
+                if pct_done >= next_snapshot_pct:
+                    snapshot_file = os.path.join(CHECKPOINT_DIR, f"snapshot_{next_snapshot_pct}pct.csv")
+                    merge_csv_files(worker_csv_files, snapshot_file)
+                    progress.console.print(f"[green]Saved data snapshot: {snapshot_file}")
+                    next_snapshot_pct += 10
+
             for p in processes:
                 p.join(timeout=2)
                 if not any(p.is_alive() for p in processes):
                     break
 
-        # Final count
+        # Final checkpoint count
         completed_count = 0
         for worker_id in range(num_workers):
-            cp_file = os.path.join("checkpoints", f"checkpoint_{worker_id}.txt")
+            cp_file = os.path.join(CHECKPOINT_DIR, f"checkpoint_{worker_id}.txt")
             if os.path.exists(cp_file):
                 with open(cp_file) as f:
                     completed_count += sum(1 for line in f if line.strip())
         progress.update(task, completed=completed_count)
 
-    # Check for worker failures
-    for i, p in enumerate(processes):
-        if p.exitcode != 0:
-            print(f"Warning: Worker {i} exited with code {p.exitcode}. Check logs/worker_{i}.log")
+    # Report any failures
+    failed_workers = [(i, p.exitcode) for i, p in enumerate(processes) if p.exitcode != 0]
+    if failed_workers:
+        for i, code in failed_workers:
+            log_hint = f"  → check logs/worker_{i}.log" if not args.debug else ""
+            print(f"[warn] Worker {i} exited with code {code}{log_hint}")
+    else:
+        print(f"All {num_workers} workers finished successfully.")
 
-    # Merge per-worker CSVs
     print(f"Merging results into {args.output}...")
     merge_csv_files(worker_csv_files, args.output)
 
-    # Count final results
     if os.path.exists(args.output):
         with open(args.output) as f:
             row_count = sum(1 for _ in f) - 1  # minus header
-        print(f"Done. {row_count} results written to {args.output}")
+        print(f"Done. {row_count:,} results written to {args.output}")
     else:
         print("Done. No output file generated.")
 

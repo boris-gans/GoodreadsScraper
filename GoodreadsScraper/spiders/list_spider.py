@@ -1,8 +1,11 @@
 """Spider to extract URL's of books from a Listopia list on Goodreads"""
 
+import logging
 import scrapy
 from scrapy import signals
 from .book_spider import BookSpider
+
+logger = logging.getLogger(__name__)
 
 class ListSpider(scrapy.Spider):
     """Extract and crawl URLs of books from a Listopia list on Goodreads
@@ -29,7 +32,10 @@ class ListSpider(scrapy.Spider):
             self.start_urls.append(list_url)
 
     def parse(self, response):
-        book_urls = response.css("a.bookTitle::attr(href)").extract()
+        logger.debug("[LIST] Parsing page %s — status=%s len=%d", response.url, response.status, len(response.body))
+        book_urls = response.css('a[href*="/book/show/"]::attr(href)').extract()
+        logger.info("[LIST] Found %d book URLs on %s", len(book_urls), response.url)
 
         for book_url in book_urls:
+            logger.debug("[LIST] Following book URL: %s", book_url)
             yield response.follow(book_url, callback=self.book_spider.parse)

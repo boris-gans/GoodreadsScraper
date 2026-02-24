@@ -1,8 +1,11 @@
 """Spider to search Goodreads for books and extract description + genres."""
 
+import logging
 import urllib.parse
 
 import scrapy
+
+logger = logging.getLogger(__name__)
 
 from ..items import BookItem, BookLoader, SearchResultItem
 
@@ -42,8 +45,10 @@ class SearchSpider(scrapy.Spider):
             )
 
     def parse_search(self, response, row_idx, title, author):
-        book_link = response.css("a.bookTitle::attr(href)").get()
+        logger.debug("[SEARCH] Search results page %s — status=%s len=%d", response.url, response.status, len(response.body))
+        book_link = response.css('a[href*="/book/show/"]::attr(href)').get()
         if not book_link:
+            logger.warning("[SEARCH] No book link found for '%s' by '%s' on %s", title, author, response.url)
             yield SearchResultItem(
                 row_idx=row_idx,
                 title=title,
@@ -56,6 +61,7 @@ class SearchSpider(scrapy.Spider):
             return
 
         book_url = response.urljoin(book_link)
+        logger.info("[SEARCH] Found book link for '%s': %s", title, book_url)
         yield scrapy.Request(
             book_url,
             callback=self.parse_book,
@@ -64,20 +70,35 @@ class SearchSpider(scrapy.Spider):
         )
 
     def parse_book(self, response, row_idx, title, author):
+        logger.debug("[SEARCH] Book page %s — status=%s len=%d", response.url, response.status, len(response.body))
+
+        next_data_raw = response.css('script#__NEXT_DATA__::text').get()
+        if next_data_raw:
+            logger.info("[SEARCH] __NEXT_DATA__ found (%d chars) on %s", len(next_data_raw), response.url)
+        else:
+            logger.warning("[SEARCH] __NEXT_DATA__ NOT FOUND on %s — fields will be empty", response.url)
+
         loader = BookLoader(BookItem(), response=response)
         loader.add_css("description", "script#__NEXT_DATA__::text")
         loader.add_css("genres", "script#__NEXT_DATA__::text")
+        loader.add_css("publishedYear", "script#__NEXT_DATA__::text")
         item = loader.load_item()
 
         description = item.get("description", "") or ""
         genres = item.get("genres", []) or []
+        published_year = item.get("publishedYear", "") or ""
 
+        logger.info(
+            "[SEARCH] Yielding SearchResultItem for '%s' — description=%d chars, genres=%s, year=%s",
+            title, len(description), genres, published_year,
+        )
         yield SearchResultItem(
             row_idx=row_idx,
             title=title,
             author=author or "",
             description=description,
             genres=";".join(genres) if isinstance(genres, list) else str(genres),
+            publishedYear=published_year,
             goodreads_url=response.url,
             status="found",
         )

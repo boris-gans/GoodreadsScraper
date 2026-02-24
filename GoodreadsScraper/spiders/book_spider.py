@@ -1,9 +1,12 @@
 """Spider to extract information from a /book/show type page on Goodreads"""
 
+import logging
 import scrapy
 
 from .author_spider import AuthorSpider
-from ..items import BookItem, BookLoader
+from ..items import BookItem, BookLoader, DEBUG
+
+logger = logging.getLogger(__name__)
 
 class BookSpider(scrapy.Spider):
     """Extract information from a /book/show type page on Goodreads
@@ -22,6 +25,15 @@ class BookSpider(scrapy.Spider):
         self.author_spider = AuthorSpider()
 
     def parse(self, response, loader=None):
+        logger.debug("[BOOK] Parsing %s — status=%s", response.request.url, response.status)
+
+        next_data_raw = response.css('script#__NEXT_DATA__::text').get()
+        if next_data_raw:
+            logger.info("[BOOK] __NEXT_DATA__ found (%d chars) on %s", len(next_data_raw), response.request.url)
+            logger.debug("[BOOK] __NEXT_DATA__ snippet: %.300s", next_data_raw)
+        else:
+            logger.warning("[BOOK] __NEXT_DATA__ NOT FOUND on %s — extraction will yield no fields", response.request.url)
+
         if not loader:
             loader = BookLoader(BookItem(), response=response)
 
@@ -42,6 +54,7 @@ class BookSpider(scrapy.Spider):
         loader.add_css('series', 'script#__NEXT_DATA__::text')
         loader.add_css('author', 'script#__NEXT_DATA__::text')
         loader.add_css('publishDate', 'script#__NEXT_DATA__::text')
+        loader.add_css('publishedYear', 'script#__NEXT_DATA__::text')
 
         loader.add_css('characters', 'script#__NEXT_DATA__::text')
         loader.add_css('places', 'script#__NEXT_DATA__::text')
@@ -54,7 +67,25 @@ class BookSpider(scrapy.Spider):
         loader.add_css('language', 'script#__NEXT_DATA__::text')
         loader.add_css("awards", 'script#__NEXT_DATA__::text')
 
-        yield loader.load_item()
+        item = loader.load_item()
+
+        if DEBUG:
+            all_fields = list(BookItem.fields.keys())
+            found = [f for f in all_fields if f in item and item[f]]
+            missing = [f for f in all_fields if f not in item or not item[f]]
+            logger.info(
+                "Book %s — found: [%s] | missing: [%s]",
+                response.request.url,
+                ", ".join(found),
+                ", ".join(missing),
+            )
+
+        logger.info("[BOOK] Yielding BookItem for %s with fields: %s", response.request.url, list(item.keys()))
+        yield item
 
         author_url = response.css('a.ContributorLink::attr(href)').extract_first()
-        yield response.follow(author_url, callback=self.author_spider.parse)
+        if author_url:
+            logger.debug("[BOOK] Following author URL: %s", author_url)
+            yield response.follow(author_url, callback=self.author_spider.parse)
+        else:
+            logger.warning("[BOOK] No author URL found on %s", response.request.url)

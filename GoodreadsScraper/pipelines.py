@@ -5,6 +5,7 @@
 # Don't forget to add your pipeline to the ITEM_PIPELINES setting
 # See: http://doc.scrapy.org/en/latest/topics/item-pipeline.html
 import csv
+import logging
 import os
 
 from scrapy.exporters import JsonLinesItemExporter
@@ -12,11 +13,13 @@ from scrapy import signals
 
 from .items import SearchResultItem
 
+logger = logging.getLogger(__name__)
+
 
 class CsvSearchResultPipeline:
     """Writes SearchResultItem rows to a per-worker CSV file with checkpointing."""
 
-    CSV_COLUMNS = ["title", "author", "genres", "description", "goodreads_url", "status"]
+    CSV_COLUMNS = ["title", "author", "genres", "description", "publishedYear", "goodreads_url", "status"]
 
     @classmethod
     def from_crawler(cls, crawler):
@@ -36,6 +39,7 @@ class CsvSearchResultPipeline:
         self.writer = csv.DictWriter(self.file, fieldnames=self.CSV_COLUMNS)
         if not file_exists:
             self.writer.writeheader()
+        logger.info("[CSV-PIPELINE] Opened output file: %s (exists_before_open=%s)", self.output_file, file_exists)
 
     def close_spider(self, spider):
         self._save_checkpoint()
@@ -43,8 +47,10 @@ class CsvSearchResultPipeline:
 
     def process_item(self, item, spider):
         if not isinstance(item, SearchResultItem):
+            logger.debug("[CSV-PIPELINE] Skipping non-SearchResultItem: %s", type(item).__name__)
             return item
 
+        logger.info("[CSV-PIPELINE] Writing SearchResultItem: title=%r status=%r", item.get("title"), item.get("status"))
         row = {col: item.get(col, "") for col in self.CSV_COLUMNS}
         self.writer.writerow(row)
         self.file.flush()
@@ -85,6 +91,7 @@ class JsonLineItemSegregator(object):
 
         for e in self.exporters.values():
             e.start_exporting()
+        logger.info("[JL-PIPELINE] Opened .jl files: %s", [name + "_" + self.output_file_suffix + ".jl" for name in self.types])
 
     def spider_closed(self, spider):
         for e in self.exporters.values():
@@ -96,5 +103,8 @@ class JsonLineItemSegregator(object):
     def process_item(self, item, spider):
         item_type = type(item).__name__.replace("Item", "").lower()
         if item_type in self.types:
+            logger.info("[JL-PIPELINE] Exporting %s item", item_type)
             self.exporters[item_type].export_item(item)
+        else:
+            logger.debug("[JL-PIPELINE] Unknown item type, skipping export: %s", type(item).__name__)
         return item

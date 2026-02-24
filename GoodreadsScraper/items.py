@@ -19,7 +19,7 @@ from dateutil.parser import parse as dateutil_parse
 from w3lib.html import remove_tags
 
 
-DEBUG = False
+DEBUG = True
 
 
 def print_schema(d, tabs=1):
@@ -118,6 +118,15 @@ def safe_parse_date(date):
     return date
 
 
+def ms_timestamp_to_year(ts):
+    try:
+        if ts is None:
+            return None
+        return datetime.datetime.utcfromtimestamp(int(ts) / 1000).year
+    except (ValueError, TypeError, OSError):
+        return None
+
+
 def filter_empty(vals):
     return [v.strip() for v in vals if v.strip()]
 
@@ -142,11 +151,13 @@ class BookItem(scrapy.Item):
     publishDate = Field(input_processor=MapCompose(json_field_extractor_v2('props.pageProps.apolloState.Book*.details.publicationTime')))
     series = Field(input_processor=MapCompose(json_field_extractor_v2('props.pageProps.apolloState.Series*.title')), output_processor=Compose(set, list))
 
+    publishedYear = Field(input_processor=MapCompose(json_field_extractor_v2('props.pageProps.apolloState.Work*.details.publicationTime'), ms_timestamp_to_year))
+
     author = Field(input_processor=MapCompose(json_field_extractor_v2('props.pageProps.apolloState.Contributor*.name')), output_processor=Compose(set, list))
 
     places = Field(input_processor=MapCompose(json_field_extractor_v2('props.pageProps.apolloState.Work*.details.places[].name')), output_processor=Compose(set, list))
     characters = Field(input_processor=MapCompose(json_field_extractor_v2('props.pageProps.apolloState.Work*.details.characters[].name')), output_processor=Compose(set, list))
-    awards = Field(input_processor=MapCompose(json_field_extractor_v2('props.pageProps.apolloState.Work*.details.awardsWon[].[name,awardedAt,category,hasWon]')), output_processor=Identity())
+    awards = Field(input_processor=MapCompose(json_field_extractor_v2('props.pageProps.apolloState.Work*.details.awardsWon[].[name,awardedAt,category,designation]')), output_processor=Identity())
 
     ratingsCount = Field(input_processor=MapCompose(json_field_extractor_v2('props.pageProps.apolloState.Work*.stats.ratingsCount')))
     reviewsCount = Field(input_processor=MapCompose(json_field_extractor_v2('props.pageProps.apolloState.Work*.stats.textReviewsCount')))
@@ -155,7 +166,7 @@ class BookItem(scrapy.Item):
 
     numPages = Field(input_processor=MapCompose(json_field_extractor_v2('props.pageProps.apolloState.Book*.details.numPages')))
     language = Field(input_processor=MapCompose(json_field_extractor_v2('props.pageProps.apolloState.Book*.details.language.name')))
-    format = Field(input_processor=MapCompose(json_field_extractor_v2('props.pageProps.apolloState.Book*.details.language.format')))
+    format = Field(input_processor=MapCompose(json_field_extractor_v2('props.pageProps.apolloState.Book*.details.format')))
 
 
 class BookLoader(ItemLoader):
@@ -192,6 +203,7 @@ class SearchResultItem(scrapy.Item):
     author = Field()
     description = Field()
     genres = Field()
+    publishedYear = Field()
     goodreads_url = Field()
     status = Field()
 
